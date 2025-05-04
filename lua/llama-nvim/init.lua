@@ -5,7 +5,7 @@ local json = vim.json
 
 -- Configuration
 M.config = {
-	api_url = "https://api.llama.com/compat/v1/",
+	api_url = "https://api.llama.com/v1/chat/completions",
 }
 
 M.original_text = nil
