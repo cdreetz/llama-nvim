@@ -77,7 +77,24 @@ local function call_llama_api_stream(messages, callback)
 										-- Extract just the text
 										local text = parsed_data.event.delta.text
 										callback(text)
+									-- Add check for completion event which may contain the final token
+									elseif
+										parsed_data.event
+										and parsed_data.event.event_type == "completion"
+										and parsed_data.event.delta
+										and parsed_data.event.delta.text
+									then
+										-- Process completion event text
+										local text = parsed_data.event.delta.text
+										callback(text)
 									end
+								else
+									-- Log parsing errors
+									vim.fn.writefile(
+										{ "JSON parse error: " .. raw_data },
+										"/tmp/llama_nvim_debug.log",
+										"a"
+									)
 								end
 							end
 						end
@@ -95,8 +112,13 @@ local function call_llama_api_stream(messages, callback)
 				end
 			end
 		end,
-		on_exit = function()
-			callback(nil) -- Signal end of stream
+		on_exit = function(_, exit_code)
+			-- Log exit code
+			vim.fn.writefile({ "Job exited with code: " .. exit_code }, "/tmp/llama_nvim_debug.log", "a")
+			-- Add a small delay before signaling completion to ensure all data is processed
+			vim.defer_fn(function()
+				callback(nil) -- Signal end of stream
+			end, 100)
 		end,
 	})
 
