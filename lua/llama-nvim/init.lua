@@ -38,81 +38,83 @@ end
 
 -- Helper function to make API calls with streaming
 local function call_llama_api_stream(messages, callback)
-	-- Log API call for debugging
-	log("Calling Llama API with model: " .. M.config.model)
-	log("API URL: " .. M.config.api_url)
-
-	local request_data = json.encode({
-		model = M.config.model,
-		messages = messages,
-		stream = true,
-	})
-
-	-- Log request data
-	log("Request data: " .. request_data)
-
 	local job_id = vim.fn.jobstart({
 		"curl",
-		"-sS",
-		"-N",
+		"-sS", -- Silent but show errors
+		"-N", -- No buffering
+		"--no-buffer", -- Additional no buffering flag
+		"--http1.1", -- Use HTTP/1.1 for better streaming support
 		M.config.api_url,
 		"-H",
 		"Authorization: Bearer " .. M.config.api_key,
 		"-H",
 		"Content-Type: application/json",
+		"-H",
+		"Accept: text/event-stream", -- Important: request SSE format
 		"-d",
-		request_data,
+		json.encode({
+			model = M.config.model,
+			messages = messages,
+			stream = true, -- Request streaming
+		}),
 	}, {
 		on_stdout = function(_, data)
 			if data then
-				-- Log first few items for debugging
-				if #data > 0 then
-					log("Received data: " .. vim.inspect(data[1]))
-				end
-
 				for _, line in ipairs(data) do
 					if line and line ~= "" then
+						-- Try to handle both formats: SSE with "data:" prefix and direct JSON
 						if line:sub(1, 6) == "data: " then
 							local raw_data = line:sub(7)
 							if raw_data ~= "[DONE]" then
 								local success, parsed_data = pcall(json.decode, raw_data)
 								if success then
-									log("Parsed data: " .. vim.inspect(parsed_data))
+									-- Handle various streaming response formats
 									if
 										parsed_data.choices
 										and parsed_data.choices[1]
 										and parsed_data.choices[1].delta
 										and parsed_data.choices[1].delta.content
 									then
+										-- OpenAI-style streaming format
 										callback(parsed_data.choices[1].delta.content)
+									elseif parsed_data.completion and parsed_data.completion.content then
+										-- Possible Llama streaming format 1
+										callback(parsed_data.completion.content)
+									elseif parsed_data.content and parsed_data.content.text then
+										-- Possible Llama streaming format 2
+										callback(parsed_data.content.text)
 									end
-								else
-									log("Failed to parse JSON: " .. raw_data)
 								end
 							end
 						else
-							log("Line doesn't start with 'data: ': " .. line)
+							-- Try to parse as direct JSON (non-SSE format)
+							local success, parsed_data = pcall(json.decode, line)
+							if success then
+								if
+									parsed_data.completion_message
+									and parsed_data.completion_message.content
+									and parsed_data.completion_message.content.type == "text"
+								then
+									-- Full response format from previous debug logs
+									local text = parsed_data.completion_message.content.text
+									-- Remove markdown code blocks if present
+									text = text:gsub("```%w*\n", ""):gsub("```", "")
+									callback(text)
+								elseif parsed_data.delta and parsed_data.delta.content then
+									-- Another possible streaming format
+									callback(parsed_data.delta.content)
+								end
+							end
 						end
 					end
 				end
 			end
 		end,
-		on_stderr = function(_, data)
-			if data and #data > 0 then
-				for _, line in ipairs(data) do
-					if line and line ~= "" then
-						log("STDERR: " .. line)
-					end
-				end
-			end
-		end,
-		on_exit = function(_, code)
-			log("Job exited with code: " .. code)
+		on_exit = function()
 			callback(nil) -- Signal end of stream
 		end,
 	})
 
-	log("Started job with ID: " .. job_id)
 	return job_id
 end
 
