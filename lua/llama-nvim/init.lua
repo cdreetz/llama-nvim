@@ -43,69 +43,54 @@ local function call_llama_api_stream(messages, callback)
 		"-sS", -- Silent but show errors
 		"-N", -- No buffering
 		"--no-buffer", -- Additional no buffering flag
-		"--http1.1", -- Use HTTP/1.1 for better streaming support
 		M.config.api_url,
 		"-H",
 		"Authorization: Bearer " .. M.config.api_key,
 		"-H",
 		"Content-Type: application/json",
 		"-H",
-		"Accept: text/event-stream", -- Important: request SSE format
+		"Accept: text/event-stream", -- Request SSE format
 		"-d",
 		json.encode({
 			model = M.config.model,
 			messages = messages,
-			stream = true, -- Request streaming
+			stream = true,
 		}),
 	}, {
 		on_stdout = function(_, data)
 			if data then
 				for _, line in ipairs(data) do
 					if line and line ~= "" then
-						-- Try to handle both formats: SSE with "data:" prefix and direct JSON
+						-- Process Llama API streaming format specifically
 						if line:sub(1, 6) == "data: " then
 							local raw_data = line:sub(7)
 							if raw_data ~= "[DONE]" then
 								local success, parsed_data = pcall(json.decode, raw_data)
 								if success then
-									-- Handle various streaming response formats
+									-- Check for the Llama-specific event format
 									if
-										parsed_data.choices
-										and parsed_data.choices[1]
-										and parsed_data.choices[1].delta
-										and parsed_data.choices[1].delta.content
+										parsed_data.event
+										and parsed_data.event.event_type == "progress"
+										and parsed_data.event.delta
+										and parsed_data.event.delta.text
 									then
-										-- OpenAI-style streaming format
-										callback(parsed_data.choices[1].delta.content)
-									elseif parsed_data.completion and parsed_data.completion.content then
-										-- Possible Llama streaming format 1
-										callback(parsed_data.completion.content)
-									elseif parsed_data.content and parsed_data.content.text then
-										-- Possible Llama streaming format 2
-										callback(parsed_data.content.text)
+										-- Extract just the text
+										local text = parsed_data.event.delta.text
+										callback(text)
 									end
 								end
 							end
-						else
-							-- Try to parse as direct JSON (non-SSE format)
-							local success, parsed_data = pcall(json.decode, line)
-							if success then
-								if
-									parsed_data.completion_message
-									and parsed_data.completion_message.content
-									and parsed_data.completion_message.content.type == "text"
-								then
-									-- Full response format from previous debug logs
-									local text = parsed_data.completion_message.content.text
-									-- Remove markdown code blocks if present
-									text = text:gsub("```%w*\n", ""):gsub("```", "")
-									callback(text)
-								elseif parsed_data.delta and parsed_data.delta.content then
-									-- Another possible streaming format
-									callback(parsed_data.delta.content)
-								end
-							end
 						end
+					end
+				end
+			end
+		end,
+		on_stderr = function(_, data)
+			if data and #data > 0 then
+				for _, line in ipairs(data) do
+					if line and line ~= "" then
+						-- Log errors to help with debugging
+						vim.fn.writefile({ "STDERR: " .. line }, "/tmp/llama_nvim_debug.log", "a")
 					end
 				end
 			end
