@@ -330,4 +330,64 @@ function M.generate_code_with_context(opts)
 	end)
 end
 
+function M.get_all_files_content()
+	local files_content = ""
+	local dir = vim.fn.getcwd()
+	for _, file in ipairs(vim.fn.readdir(dir)) do
+		local file_path = dir .. "/" .. file
+		local file_stat = vim.loop.fs_stat(file_path)
+		if file_stat and file_stat.type == "file" then
+			local content = M.get_file_content(file_path)
+			if content then
+				files_content = files_content .. "File: " .. file .. "\n" .. content .. "\n\n"
+			end
+		end
+	end
+	return files_content
+end
+
+function M.LlamaGenerateWithCodebase(opts)
+	local prompt = opts.args
+	log("LlamaGenerateWithCodebase prompt: " .. prompt)
+
+	local codebase_content = M.get_all_files_content()
+
+	local messages = {
+		{
+			role = "system",
+			content = "You are a helpful coding assistant. Based on the users prompt and the codebase context, write the code or response. If the user is asking you to write some code, only generate the code they need with no additional formatting or text. The code you generate is written directly to the current file so make sure it is valid code. DO NOT WRAP THE CODE IN BACKTICKS, ONLY WRITE THE REAL CODE.",
+		},
+		{ role = "user", content = prompt .. "\n\nCodebase context:\n" .. codebase_content },
+	}
+
+	local row, col = unpack(vim.api.nvim_win_get_cursor(0))
+
+	-- Notify user that generation has started
+	vim.api.nvim_echo({ { "Generating code with codebase context using Llama API...", "WarningMsg" } }, false, {})
+
+	call_llama_api_stream(messages, function(content)
+		if content then
+			local new_lines = vim.split(content, "\n", true)
+			for i, line in ipairs(new_lines) do
+				if i == 1 then
+					-- Append to the current line
+					local current_line = vim.api.nvim_buf_get_lines(0, row - 1, row, false)[1]
+					vim.api.nvim_buf_set_lines(0, row - 1, row, false, { current_line .. line })
+				else
+					-- Insert new lines
+					vim.api.nvim_buf_set_lines(0, row, row, false, { line })
+					row = row + 1
+				end
+			end
+			vim.api.nvim_win_set_cursor(0, { row, col })
+		else
+			-- End of stream
+			vim.api.nvim_echo({ { "Code generation with codebase context complete.", "Normal" } }, false, {})
+			log("Code generation with codebase context complete")
+		end
+	end)
+end
+
+vim.api.nvim_create_user_command("LlamaGenerateWithCodebase", M.LlamaGenerateWithCodebase, { nargs = 1 })
+
 return M
