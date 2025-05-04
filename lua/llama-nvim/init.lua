@@ -346,11 +346,45 @@ function M.get_all_files_content()
 	return files_content
 end
 
+function M.get_all_files_content(recursive)
+	local codebase_content = ""
+	local files = {}
+	if recursive then
+		for file in vim.fs.dir(".") do
+			if vim.fn.isdirectory(file) == 1 then
+				for _, f in ipairs(vim.fn.glob(file .. "/**/*", 1, 1)) do
+					if vim.fn.isdirectory(f) == 0 then
+						table.insert(files, f)
+					end
+				end
+			else
+				table.insert(files, file)
+			end
+		end
+	else
+		for file in vim.fs.dir(".") do
+			if vim.fn.isdirectory(file) == 0 then
+				table.insert(files, file)
+			end
+		end
+	end
+
+	for _, file in ipairs(files) do
+		if vim.fn.filereadable(file) == 1 then
+			local content = table.concat(vim.fn.readfile(file), "\n")
+			codebase_content = codebase_content .. "File: " .. file .. "\n" .. content .. "\n\n"
+		end
+	end
+
+	return codebase_content
+end
+
 function M.LlamaGenerateWithCodebase(opts)
 	local prompt = opts.args
 	log("LlamaGenerateWithCodebase prompt: " .. prompt)
 
-	local codebase_content = M.get_all_files_content()
+	local recursive = opts.fargs[2] == "-r"
+	local codebase_content = M.get_all_files_content(recursive)
 
 	local messages = {
 		{
@@ -388,6 +422,11 @@ function M.LlamaGenerateWithCodebase(opts)
 	end)
 end
 
-vim.api.nvim_create_user_command("LlamaGenerateWithCodebase", M.LlamaGenerateWithCodebase, { nargs = 1 })
+vim.api.nvim_create_user_command("LlamaGenerateWithCodebase", M.LlamaGenerateWithCodebase, {
+	nargs = "*",
+	complete = function()
+		return { "-r" }
+	end,
+})
 
 return M
