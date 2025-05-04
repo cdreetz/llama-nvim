@@ -147,6 +147,7 @@ function M.generate_code(opts)
 end
 
 -- Function to edit code
+-- Function to edit code
 function M.edit_code(opts)
 	local start_line = opts.line1 - 1
 	local end_line = opts.line2
@@ -160,7 +161,7 @@ function M.edit_code(opts)
 	local messages = {
 		{
 			role = "system",
-			content = "You are a helpful coding assistant. Based on the users prompt, and the selected code, rewrite the selection with any necessary edits based on the users prompt. All of the selected code will be deleted so make sure you rewrite it by incorporating both the old code and the new changes. The user is asking you to write some code, only generate the code they need with no additional formatting or text. The code you generate is written directly to the current file so make sure it is valid code. DO NOT WRAP THE CODE IN BACKTICKS, ONLY WRITE THE REAL CODE.",
+			content = "You are a helpful coding assistant. Based on the user's prompt, and the selected code, rewrite the selection with any necessary edits based on the user's prompt. All of the selected code will be deleted so make sure you rewrite it by incorporating both the old code and the new changes. The user is asking you to write some code, only generate the code they need with no additional formatting or text. The code you generate is written directly to the current file so make sure it is valid code.",
 		},
 		{
 			role = "user",
@@ -171,6 +172,9 @@ function M.edit_code(opts)
 	-- Store original cursor position
 	local window = vim.api.nvim_get_current_win()
 	local cursor_pos = vim.api.nvim_win_get_cursor(window)
+
+	-- Store original selection size
+	local original_selection_size = end_line - start_line
 
 	-- Clear the selected lines but keep a backup
 	local original_lines = vim.api.nvim_buf_get_lines(0, start_line, end_line, false)
@@ -194,8 +198,9 @@ function M.edit_code(opts)
 			-- Split the current collected text into lines
 			local new_lines = vim.split(collected_text, "\n", true)
 
-			-- Replace the entire range with the current state of collected text
-			vim.api.nvim_buf_set_lines(0, start_line, start_line + #new_lines, false, new_lines)
+			-- Make sure we don't overwrite lines we didn't intend to
+			vim.api.nvim_buf_set_lines(0, start_line, start_line + original_selection_size, false, {})
+			vim.api.nvim_buf_set_lines(0, start_line, start_line, false, new_lines)
 
 			-- Update is_first_chunk flag
 			if is_first_chunk then
@@ -204,7 +209,18 @@ function M.edit_code(opts)
 		else
 			-- End of stream, finalize changes
 			local final_lines = vim.split(collected_text, "\n", true)
-			vim.api.nvim_buf_set_lines(0, start_line, start_line + #final_lines, false, final_lines)
+
+			-- How many lines to remove vs. how many we're adding
+			if #final_lines >= original_selection_size then
+				-- We're adding more or the same number of lines - simple replacement
+				vim.api.nvim_buf_set_lines(0, start_line, start_line + original_selection_size, false, final_lines)
+			else
+				-- We're adding fewer lines than were originally selected
+				-- First remove the entire selection
+				vim.api.nvim_buf_set_lines(0, start_line, start_line + original_selection_size, false, {})
+				-- Then add our new lines
+				vim.api.nvim_buf_set_lines(0, start_line, start_line, false, final_lines)
+			end
 
 			-- Calculate new cursor position
 			local new_cursor_pos = {
@@ -217,7 +233,17 @@ function M.edit_code(opts)
 
 			-- Notify completion
 			vim.api.nvim_echo({ { "Code editing complete.", "Normal" } }, false, {})
-			vim.fn.writefile({ "Code editing complete" }, "/tmp/llama_nvim_debug.log", "a")
+			vim.fn.writefile(
+				{
+					"Code editing complete. Added "
+						.. #final_lines
+						.. " lines, removed "
+						.. original_selection_size
+						.. " lines",
+				},
+				"/tmp/llama_nvim_debug.log",
+				"a"
+			)
 		end
 	end)
 end
