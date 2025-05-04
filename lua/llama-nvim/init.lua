@@ -151,42 +151,73 @@ function M.edit_code(opts)
 	local start_line = opts.line1 - 1
 	local end_line = opts.line2
 	local selected_text = table.concat(vim.api.nvim_buf_get_lines(0, start_line, end_line, false), "\n")
-	local prompt = opts.args
-	log("LlamaEdit prompt: " .. prompt)
-	log("Selected text length: " .. #selected_text)
+	local prompt = opts.args or ""
+
+	-- Log for debugging
+	vim.fn.writefile({ "Edit code range: " .. start_line .. "-" .. end_line }, "/tmp/llama_nvim_debug.log", "a")
+	vim.fn.writefile({ "Selected text: " .. selected_text }, "/tmp/llama_nvim_debug.log", "a")
 
 	local messages = {
 		{
 			role = "system",
 			content = "You are a helpful coding assistant. Based on the users prompt, and the selected code, rewrite the selection with any necessary edits based on the users prompt. All of the selected code will be deleted so make sure you rewrite it by incorporating both the old code and the new changes. The user is asking you to write some code, only generate the code they need with no additional formatting or text. The code you generate is written directly to the current file so make sure it is valid code. DO NOT WRAP THE CODE IN BACKTICKS, ONLY WRITE THE REAL CODE.",
 		},
-		{ role = "user", content = prompt .. "\n\nSelected code:\n" .. selected_text },
+		{
+			role = "user",
+			content = "Make the following changes to this code: " .. prompt .. "\n\nCODE TO EDIT:\n" .. selected_text,
+		},
 	}
-	local row, col = unpack(vim.api.nvim_win_get_cursor(0))
+
+	-- Store original cursor position
+	local window = vim.api.nvim_get_current_win()
+	local cursor_pos = vim.api.nvim_win_get_cursor(window)
+
+	-- Clear the selected lines but keep a backup
+	local original_lines = vim.api.nvim_buf_get_lines(0, start_line, end_line, false)
+	vim.api.nvim_buf_set_lines(0, start_line, end_line, false, {})
 
 	-- Notify user that editing has started
 	vim.api.nvim_echo({ { "Editing code with Llama API...", "WarningMsg" } }, false, {})
 
-	-- Clear the selected lines
-	vim.api.nvim_buf_set_lines(0, start_line, end_line, false, {})
+	-- Variables to collect the new text
+	local collected_text = ""
+	local is_first_chunk = true
 
 	call_llama_api_stream(messages, function(content)
 		if content then
-			local new_lines = vim.split(content, "\n", true)
-			for i, line in ipairs(new_lines) do
-				if i == 1 then
-					-- Append to the current line
-					local current_line = vim.api.nvim_buf_get_lines(0, start_line, start_line + 1, false)[1] or ""
-					vim.api.nvim_buf_set_lines(0, start_line, start_line + 1, false, { current_line .. line })
-				else
-					-- Insert new lines
-					vim.api.nvim_buf_set_lines(0, start_line + i - 1, start_line + i - 1, false, { line })
-				end
+			-- Remove markdown code blocks if present
+			content = content:gsub("```%w*\n", ""):gsub("```", "")
+
+			-- Append to our collected text
+			collected_text = collected_text .. content
+
+			-- Split the current collected text into lines
+			local new_lines = vim.split(collected_text, "\n", true)
+
+			-- Replace the entire range with the current state of collected text
+			vim.api.nvim_buf_set_lines(0, start_line, start_line + #new_lines, false, new_lines)
+
+			-- Update is_first_chunk flag
+			if is_first_chunk then
+				is_first_chunk = false
 			end
 		else
-			-- End of stream
+			-- End of stream, finalize changes
+			local final_lines = vim.split(collected_text, "\n", true)
+			vim.api.nvim_buf_set_lines(0, start_line, start_line + #final_lines, false, final_lines)
+
+			-- Calculate new cursor position
+			local new_cursor_pos = {
+				start_line + math.min(cursor_pos[1] - start_line - 1, #final_lines),
+				math.min(cursor_pos[2], #(final_lines[math.min(cursor_pos[1] - start_line, #final_lines)] or "")),
+			}
+
+			-- Set cursor to appropriate position
+			pcall(vim.api.nvim_win_set_cursor, window, new_cursor_pos)
+
+			-- Notify completion
 			vim.api.nvim_echo({ { "Code editing complete.", "Normal" } }, false, {})
-			log("Code editing complete")
+			vim.fn.writefile({ "Code editing complete" }, "/tmp/llama_nvim_debug.log", "a")
 		end
 	end)
 end
