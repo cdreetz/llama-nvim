@@ -36,20 +36,22 @@ function M.setup(opts)
 	log("Llama NVim plugin setup complete with model: " .. (M.config.model or "not set"))
 end
 
--- Helper function to make API calls with streaming
+-- Fix focusing on stop_reason detection
 local function call_llama_api_stream(messages, callback)
+	local accumulated_text = ""
+
 	local job_id = vim.fn.jobstart({
 		"curl",
-		"-sS", -- Silent but show errors
-		"-N", -- No buffering
-		"--no-buffer", -- Additional no buffering flag
+		"-sS",
+		"-N",
+		"--no-buffer",
 		M.config.api_url,
 		"-H",
 		"Authorization: Bearer " .. M.config.api_key,
 		"-H",
 		"Content-Type: application/json",
 		"-H",
-		"Accept: text/event-stream", -- Request SSE format
+		"Accept: text/event-stream",
 		"-d",
 		json.encode({
 			model = M.config.model,
@@ -61,37 +63,61 @@ local function call_llama_api_stream(messages, callback)
 			if data then
 				for _, line in ipairs(data) do
 					if line and line ~= "" then
-						-- Process Llama API streaming format specifically
+						vim.fn.writefile({ "LINE: " .. line }, "/tmp/llama_nvim_debug.log", "a")
+
+						-- Process SSE data format
 						if line:sub(1, 6) == "data: " then
 							local raw_data = line:sub(7)
-							if raw_data ~= "[DONE]" then
+
+							if raw_data == "[DONE]" then
+								vim.fn.writefile({ "DONE marker received" }, "/tmp/llama_nvim_debug.log", "a")
+							else
 								local success, parsed_data = pcall(json.decode, raw_data)
 								if success then
-									-- Check for the Llama-specific event format
+									-- Check for text content in any recognized format
+									local text = nil
+									local stop_reason = nil
+
+									-- Handle Llama API specific format
 									if
 										parsed_data.event
-										and parsed_data.event.event_type == "progress"
 										and parsed_data.event.delta
 										and parsed_data.event.delta.text
 									then
-										-- Extract just the text
-										local text = parsed_data.event.delta.text
-										callback(text)
-									-- Add check for completion event which may contain the final token
-									elseif
+										text = parsed_data.event.delta.text
+									end
+
+									-- Check for stop reason - key indicator that generation is complete
+									if
 										parsed_data.event
-										and parsed_data.event.event_type == "completion"
-										and parsed_data.event.delta
-										and parsed_data.event.delta.text
+										and parsed_data.event.completion
+										and parsed_data.event.completion.stop_reason
 									then
-										-- Process completion event text
-										local text = parsed_data.event.delta.text
+										stop_reason = parsed_data.event.completion.stop_reason
+										vim.fn.writefile(
+											{ "STOP REASON: " .. stop_reason },
+											"/tmp/llama_nvim_debug.log",
+											"a"
+										)
+									end
+
+									-- Process the text if we got some
+									if text then
+										accumulated_text = accumulated_text .. text
 										callback(text)
 									end
+
+									-- If we got a stop reason, ensure we've processed all the text
+									if stop_reason then
+										vim.fn.writefile(
+											{ "Final accumulated text: " .. accumulated_text },
+											"/tmp/llama_nvim_debug.log",
+											"a"
+										)
+									end
 								else
-									-- Log parsing errors
 									vim.fn.writefile(
-										{ "JSON parse error: " .. raw_data },
+										{ "JSON PARSE ERROR: " .. raw_data },
 										"/tmp/llama_nvim_debug.log",
 										"a"
 									)
@@ -106,19 +132,18 @@ local function call_llama_api_stream(messages, callback)
 			if data and #data > 0 then
 				for _, line in ipairs(data) do
 					if line and line ~= "" then
-						-- Log errors to help with debugging
 						vim.fn.writefile({ "STDERR: " .. line }, "/tmp/llama_nvim_debug.log", "a")
 					end
 				end
 			end
 		end,
 		on_exit = function(_, exit_code)
-			-- Log exit code
-			vim.fn.writefile({ "Job exited with code: " .. exit_code }, "/tmp/llama_nvim_debug.log", "a")
-			-- Add a small delay before signaling completion to ensure all data is processed
+			vim.fn.writefile({ "JOB EXIT with code: " .. exit_code }, "/tmp/llama_nvim_debug.log", "a")
+
+			-- Add a delay before signaling completion to ensure all data is processed
 			vim.defer_fn(function()
 				callback(nil) -- Signal end of stream
-			end, 100)
+			end, 200)
 		end,
 	})
 
