@@ -330,22 +330,6 @@ function M.generate_code_with_context(opts)
 	end)
 end
 
-function M.get_all_files_content()
-	local files_content = ""
-	local dir = vim.fn.getcwd()
-	for _, file in ipairs(vim.fn.readdir(dir)) do
-		local file_path = dir .. "/" .. file
-		local file_stat = vim.loop.fs_stat(file_path)
-		if file_stat and file_stat.type == "file" then
-			local content = M.get_file_content(file_path)
-			if content then
-				files_content = files_content .. "File: " .. file .. "\n" .. content .. "\n\n"
-			end
-		end
-	end
-	return files_content
-end
-
 function M.get_all_files_content(recursive)
 	local codebase_content = ""
 	local files = {}
