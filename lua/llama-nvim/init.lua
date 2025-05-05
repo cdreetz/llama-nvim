@@ -10,6 +10,7 @@ M.config = {
 
 M.original_text = nil
 M.original_range = nil
+M.chat_buffer = nil
 
 -- Debugging function
 local function log(message)
@@ -412,5 +413,37 @@ vim.api.nvim_create_user_command("LlamaGenerateWithCodebase", M.LlamaGenerateWit
 		return { "-r" }
 	end,
 })
+
+-- Simple function to open a chat sidebar
+function M.open_chat_sidebar()
+	-- Create a buffer if it doesn't exist
+	if not M.chat_buffer or not vim.api.nvim_buf_is_valid(M.chat_buffer) then
+		M.chat_buffer = vim.api.nvim_create_buf(false, true)
+		vim.api.nvim_buf_set_name(M.chat_buffer, "LlamaChat")
+	end
+	
+	-- Open the buffer in a vertical split on the right
+	vim.cmd("vsplit")
+	vim.cmd("vertical resize 50")
+	vim.cmd("wincmd L") -- Move to rightmost position
+	vim.api.nvim_win_set_buf(0, M.chat_buffer)
+	
+	-- Add an input area at the bottom
+	vim.api.nvim_buf_set_lines(M.chat_buffer, 0, -1, false, {
+		"",
+		"",
+		"--- Type your message below ---",
+		""
+	})
+	
+	-- Set cursor at input line
+	vim.api.nvim_win_set_cursor(0, {4, 0})
+	
+	-- Enter insert mode
+	vim.cmd("startinsert")
+end
+
+-- Register the chat command
+vim.api.nvim_create_user_command("LlamaChat", M.open_chat_sidebar, {})
 
 return M
