@@ -414,6 +414,35 @@ vim.api.nvim_create_user_command("LlamaGenerateWithCodebase", M.LlamaGenerateWit
 	end,
 })
 
+-- Setup chat autocmds for buffer behavior
+function M.setup_chat_buffer_behavior()
+	local chat_augroup = vim.api.nvim_create_augroup("LlamaChatBuffer", { clear = true })
+	
+	-- Make the main chat area read-only except the input area
+	vim.api.nvim_create_autocmd("InsertEnter", {
+		buffer = M.chat_buffer,
+		group = chat_augroup,
+		callback = function()
+			local line = vim.api.nvim_win_get_cursor(0)[1]
+			local input_line = vim.api.nvim_buf_line_count(M.chat_buffer) - 1
+			
+			-- If not in the input area, move to it
+			if line < input_line then
+				vim.api.nvim_win_set_cursor(0, {input_line + 1, 0})
+			end
+		end,
+	})
+	
+	-- Setup key mapping to enter insert mode at input area
+	vim.api.nvim_buf_set_keymap(
+		M.chat_buffer, 
+		"n", 
+		"i", 
+		"<cmd>lua vim.api.nvim_win_set_cursor(0, {vim.api.nvim_buf_line_count(require('llama-nvim').chat_buffer), 0}) | startinsert<CR>", 
+		{ noremap = true, silent = true }
+	)
+end
+
 -- Simple function to open a chat sidebar
 function M.open_chat_sidebar()
 	-- Create a buffer if it doesn't exist
@@ -428,16 +457,26 @@ function M.open_chat_sidebar()
 	vim.cmd("wincmd L") -- Move to rightmost position
 	vim.api.nvim_win_set_buf(0, M.chat_buffer)
 	
-	-- Add an input area at the bottom
-	vim.api.nvim_buf_set_lines(M.chat_buffer, 0, -1, false, {
-		"",
-		"",
-		"--- Type your message below ---",
-		""
-	})
+	-- Calculate chat content area and input area
+	local line_count = 20 -- Example content area size
 	
-	-- Set cursor at input line
-	vim.api.nvim_win_set_cursor(0, {4, 0})
+	-- Create chat content with separator and input area at bottom
+	local lines = {}
+	for i = 1, line_count do
+		table.insert(lines, "")
+	end
+	table.insert(lines, string.rep("-", 48))
+	table.insert(lines, "--- Type your message below ---")
+	table.insert(lines, "")
+	
+	-- Set the buffer content
+	vim.api.nvim_buf_set_lines(M.chat_buffer, 0, -1, false, lines)
+	
+	-- Set cursor at input line (the last line)
+	vim.api.nvim_win_set_cursor(0, {#lines, 0})
+	
+	-- Setup buffer behavior
+	M.setup_chat_buffer_behavior()
 	
 	-- Enter insert mode
 	vim.cmd("startinsert")
