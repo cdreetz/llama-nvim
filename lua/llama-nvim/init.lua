@@ -414,33 +414,188 @@ vim.api.nvim_create_user_command("LlamaGenerateWithCodebase", M.LlamaGenerateWit
 	end,
 })
 
+-- Add message to chat
+function M.add_message_to_chat(message)
+	-- Don't add empty messages
+	if message == nil or message == "" then
+		return
+	end
+	
+	-- Get current buffer content
+	local lines = vim.api.nvim_buf_get_lines(M.chat_buffer, 0, -1, false)
+	local separator_line = 0
+	
+	-- Find the separator line
+	for i, line in ipairs(lines) do
+		if line:match("^%-%-%-%-%-") then
+			separator_line = i - 1
+			break
+		end
+	end
+	
+	-- If separator not found, return
+	if separator_line == 0 then
+		return
+	end
+	
+	-- Insert the new message at the top of the content area
+	local timestamp = os.date("%H:%M:%S")
+	local new_message = "[" .. timestamp .. "] " .. message
+	
+	-- Insert the message before the separator
+	vim.api.nvim_buf_set_lines(M.chat_buffer, separator_line, separator_line, false, {new_message, ""})
+	
+	-- Clear the input area
+	local input_line = separator_line + 3
+	vim.api.nvim_buf_set_lines(M.chat_buffer, input_line, input_line + 1, false, {""})
+	
+	-- Move cursor back to input line
+	vim.api.nvim_win_set_cursor(0, {input_line + 1, 0})
+end
+
 -- Setup chat autocmds for buffer behavior
 function M.setup_chat_buffer_behavior()
 	local chat_augroup = vim.api.nvim_create_augroup("LlamaChatBuffer", { clear = true })
 	
-	-- Make the main chat area read-only except the input area
+	-- Make buffer modifiable only in the input area
+	vim.api.nvim_buf_set_option(M.chat_buffer, "modifiable", true)
+	
+	-- Handle Insert mode to prevent editing outside input area
 	vim.api.nvim_create_autocmd("InsertEnter", {
 		buffer = M.chat_buffer,
 		group = chat_augroup,
 		callback = function()
 			local line = vim.api.nvim_win_get_cursor(0)[1]
-			local input_line = vim.api.nvim_buf_line_count(M.chat_buffer) - 1
+			local lines = vim.api.nvim_buf_get_lines(M.chat_buffer, 0, -1, false)
+			local separator_line = 0
 			
-			-- If not in the input area, move to it
-			if line < input_line then
-				vim.api.nvim_win_set_cursor(0, {input_line + 1, 0})
+			-- Find the separator line
+			for i, l in ipairs(lines) do
+				if l:match("^%-%-%-%-%-") then
+					separator_line = i
+					break
+				end
+			end
+			
+			-- If not in the input area (below separator + 2), move to input
+			if line <= separator_line + 1 then
+				local input_line = separator_line + 2
+				vim.api.nvim_win_set_cursor(0, {input_line, 0})
 			end
 		end,
 	})
 	
-	-- Setup key mapping to enter insert mode at input area
+	-- Handle Enter key in insert mode to submit message
+	vim.api.nvim_buf_set_keymap(
+		M.chat_buffer,
+		"i",
+		"<CR>",
+		"<Esc>:lua require('llama-nvim').submit_chat_message()<CR>",
+		{ noremap = true, silent = true }
+	)
+	
+	-- Setup key mapping to always enter insert mode at input area
 	vim.api.nvim_buf_set_keymap(
 		M.chat_buffer, 
 		"n", 
 		"i", 
-		"<cmd>lua vim.api.nvim_win_set_cursor(0, {vim.api.nvim_buf_line_count(require('llama-nvim').chat_buffer), 0}) | startinsert<CR>", 
+		"<cmd>lua require('llama-nvim').go_to_input()<CR>", 
 		{ noremap = true, silent = true }
 	)
+	
+	-- Make all text before input area read-only
+	vim.api.nvim_create_autocmd("TextChanged", {
+		buffer = M.chat_buffer,
+		group = chat_augroup,
+		callback = function()
+			local lines = vim.api.nvim_buf_get_lines(M.chat_buffer, 0, -1, false)
+			local separator_line = 0
+			
+			-- Find the separator line
+			for i, l in ipairs(lines) do
+				if l:match("^%-%-%-%-%-") then
+					separator_line = i
+					break
+				end
+			end
+			
+			-- Check if content before separator was changed
+			local original_lines = vim.b[M.chat_buffer].original_lines or {}
+			local content_changed = false
+			
+			if #original_lines >= separator_line then
+				for i = 1, separator_line do
+					if i <= #original_lines and lines[i] ~= original_lines[i] then
+						content_changed = true
+						break
+					end
+				end
+				
+				-- If content was changed, restore it
+				if content_changed then
+					local restore_lines = {}
+					for i = 1, separator_line do
+						if i <= #original_lines then
+							table.insert(restore_lines, original_lines[i])
+						end
+					end
+					vim.api.nvim_buf_set_lines(M.chat_buffer, 0, separator_line, false, restore_lines)
+				end
+			end
+			
+			-- Store current state for next check
+			vim.b[M.chat_buffer].original_lines = vim.deepcopy(lines)
+		end
+	})
+end
+
+-- Go to input area
+function M.go_to_input()
+	if not M.chat_buffer or not vim.api.nvim_buf_is_valid(M.chat_buffer) then
+		return
+	end
+	
+	local lines = vim.api.nvim_buf_get_lines(M.chat_buffer, 0, -1, false)
+	local separator_line = 0
+	
+	-- Find the separator line
+	for i, l in ipairs(lines) do
+		if l:match("^%-%-%-%-%-") then
+			separator_line = i
+			break
+		end
+	end
+	
+	if separator_line > 0 then
+		local input_line = separator_line + 2
+		vim.api.nvim_win_set_cursor(0, {input_line, 0})
+		vim.cmd("startinsert")
+	end
+end
+
+-- Submit the current message
+function M.submit_chat_message()
+	local lines = vim.api.nvim_buf_get_lines(M.chat_buffer, 0, -1, false)
+	local separator_line = 0
+	
+	-- Find the separator line
+	for i, l in ipairs(lines) do
+		if l:match("^%-%-%-%-%-") then
+			separator_line = i
+			break
+		end
+	end
+	
+	if separator_line > 0 then
+		local input_line = separator_line + 2
+		local message = lines[input_line]
+		
+		-- Add the message to chat
+		M.add_message_to_chat(message)
+		
+		-- Enter insert mode again
+		vim.cmd("startinsert")
+	end
 end
 
 -- Simple function to open a chat sidebar
