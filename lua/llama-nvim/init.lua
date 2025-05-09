@@ -444,34 +444,27 @@ function M.record_and_transcribe_local()
 	local whisper_path = vim.fn.expand("~/dev/whisper.cpp/build/bin/whisper-cli")
 	local whisper_model = vim.fn.expand("~/dev/whisper.cpp/models/ggml-base.en.bin")
 
-	local transcribe_cmd = string.format(
-		"%s -m %s -l en -t transcribe --output-txt %s %s",
-		whisper_path,
-		whisper_model,
-		temp_audio_file,
-		temp_output_file
-	)
+	local transcribe_cmd =
+		string.format("%s -m %s -l en -t transcribe -f %s 2>/dev/null", whisper_path, whisper_model, temp_audio_file)
 
-	local transcribe_success = os.execute(transcribe_cmd)
-	if not transcribe_success then
+	--local transcribe_success = os.execute(transcribe_cmd)
+	local handle = io.popen(transcribe_cmd)
+	if not handle then
 		vim.api.nvim_echo({ { "Error transcribing audio", "ErrorMsg" } }, false, {})
 		os.remove(temp_audio_file)
 		return
 	end
 
-	local file = io.open(temp_output_file, "r")
-	if not file then
-		vim.api.nvim_echo({ { "Error reading transcription output", "ErrorMsg" } }, false, {})
-		os.remove(temp_audio_file)
-		os.remove(temp_output_file)
-		return
-	end
-
-	local text = file:read("*all")
-	file:close()
+	local output = handle:read("*a")
+	handle:close()
 
 	os.remove(temp_audio_file)
-	os.remove(temp_output_file)
+
+	local text = output:match("%[%d+:%d+:%d+%s*%-%>%s*%d+:%d+:%d+%]%s*(.+)")
+	if not text or text == "" then
+		vim.api.nvim_echo({ { "No speech detected or transcription failed", "WarningMsg" } }, false, {})
+		return
+	end
 
 	text = text:gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")
 
