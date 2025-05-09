@@ -444,7 +444,13 @@ function M.record_and_transcribe_local()
 	local whisper_path = vim.fn.expand("~/dev/whisper.cpp/build/bin/whisper-cli")
 	local whisper_model = vim.fn.expand("~/dev/whisper.cpp/models/ggml-base.en.bin")
 
-	local transcribe_cmd = string.format("%s -m %s %s ", whisper_path, whisper_model, temp_audio_file)
+	local transcribe_cmd = string.format(
+		"%s -m %s -l en -t transcribe --output-txt %s %s",
+		whisper_path,
+		whisper_model,
+		temp_audio_file,
+		temp_output_file
+	)
 
 	local transcribe_success = os.execute(transcribe_cmd)
 	if not transcribe_success then
