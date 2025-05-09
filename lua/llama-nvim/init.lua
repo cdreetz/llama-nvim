@@ -422,59 +422,55 @@ vim.api.nvim_create_user_command("LlamaGenerateWithCodebase", M.LlamaGenerateWit
 -- speech stuff
 function M.record_and_transcribe_local()
 	local temp_audio_file = os.tmpname() .. ".wav"
-	local temp_output_file = os.tmpname() .. ".txt"
 
-	log("Starting audio recording to " .. temp_audio_file)
-
-	vim.api.nvim_echo({ { "Listening for voice command (5 seconds)...", "WarningMsg" } }, false, {})
-
+	-- Record audio
 	local record_cmd = string.format("sox -d -r 16000 -c 1 -b 16 %s trim 0 5", temp_audio_file)
-
-	local record_success = os.execute(record_cmd)
-	if not record_success then
-		vim.api.nvim_echo({ { "Error recording audio. Is sox installed?", "ErrorMsg" } }, false, {})
-		return
-	end
+	vim.api.nvim_echo({ { "Listening for voice command (5 seconds)...", "WarningMsg" } }, false, {})
+	os.execute(record_cmd)
 
 	vim.api.nvim_echo({ { "Processing speech...", "WarningMsg" } }, false, {})
 
-	-- path to whisper.cpp executable
-	--local whisper_path = M.config.whisper_path or vim.fn.expand("~/whisper.cpp/main")
-	--local whisper_model = M.config.whisper_model or vim.fn.expand("~/whisper.cpp/models/ggml-base.en.bin")
+	-- Hard-coded paths that work
 	local whisper_path = vim.fn.expand("~/dev/whisper.cpp/build/bin/whisper-cli")
 	local whisper_model = vim.fn.expand("~/dev/whisper.cpp/models/ggml-base.en.bin")
 
-	local transcribe_cmd =
-		string.format("%s -m %s -l en -t transcribe -f %s 2>/dev/null", whisper_path, whisper_model, temp_audio_file)
+	-- Use only the basic command with no fancy options
+	local transcribe_cmd = whisper_path .. " -m " .. whisper_model .. " " .. temp_audio_file
 
-	--local transcribe_success = os.execute(transcribe_cmd)
-	local handle = io.popen(transcribe_cmd)
-	if not handle then
-		vim.api.nvim_echo({ { "Error transcribing audio", "ErrorMsg" } }, false, {})
-		os.remove(temp_audio_file)
-		return
-	end
-
+	-- Run command and capture output with io.popen
+	local handle = io.popen(transcribe_cmd .. " 2>&1")
 	local output = handle:read("*a")
 	handle:close()
 
 	os.remove(temp_audio_file)
 
-	local text = output:match("%[%d+:%d+:%d+%s*%-%>%s*%d+:%d+:%d+%]%s*(.+)")
-	if not text or text == "" then
-		vim.api.nvim_echo({ { "No speech detected or transcription failed", "WarningMsg" } }, false, {})
-		return
+	-- Find the transcription in the output - look for anything after [TIME -> TIME]
+	local text = output:match("%[%d+:%d+:%d+.%d+ %-%-> %d+:%d+:%d+.%d+%]%s*(.+)")
+		or output:match("%[%d+:%d+:%d+ %-%-> %d+:%d+:%d+%]%s*(.+)")
+
+	-- If no match with timestamp format, look for the last line that might be the transcription
+	if not text then
+		for line in output:gmatch("[^\r\n]+") do
+			if
+				not line:match("^%s*$") -- not empty
+				and not line:match("^whisper_") -- not a whisper log line
+				and not line:match("^%[") -- not a timestamp or log
+				and not line:match("^main:")
+			then -- not main function output
+				text = line
+			end
+		end
 	end
 
-	text = text:gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")
-
-	if text == "" then
+	if not text or text == "" or text:match("%[BLANK_AUDIO%]") then
 		vim.api.nvim_echo({ { "No speech detected", "WarningMsg" } }, false, {})
 		return
 	end
 
-	vim.api.nvim_echo({ { "Recognized: " .. text, "Normal" } }, false, {})
+	-- Clean up text
+	text = text:gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")
 
+	vim.api.nvim_echo({ { "Recognized: " .. text, "Normal" } }, false, {})
 	M.process_voice_command(text)
 
 	return text
