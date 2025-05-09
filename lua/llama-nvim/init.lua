@@ -434,29 +434,39 @@ function M.record_and_transcribe_local()
 	local whisper_path = vim.fn.expand("~/dev/whisper.cpp/build/bin/whisper-cli")
 	local whisper_model = vim.fn.expand("~/dev/whisper.cpp/models/ggml-base.en.bin")
 
-	-- Use only the basic command with no fancy options
-	local transcribe_cmd = whisper_path .. " -m " .. whisper_model .. " " .. temp_audio_file
+	-- Use only the basic command with no fancy options, redirect stderr to /dev/null
+	local transcribe_cmd = whisper_path .. " -m " .. whisper_model .. " " .. temp_audio_file .. " 2>/dev/null"
 
-	-- Run command and capture output with io.popen
-	local handle = io.popen(transcribe_cmd .. " 2>&1")
+	-- Run command and capture output
+	local handle = io.popen(transcribe_cmd)
 	local output = handle:read("*a")
 	handle:close()
 
 	os.remove(temp_audio_file)
 
-	-- Find the transcription in the output - look for anything after [TIME -> TIME]
-	local text = output:match("%[%d+:%d+:%d+.%d+ %-%-> %d+:%d+:%d+.%d+%]%s*(.+)")
-		or output:match("%[%d+:%d+:%d+ %-%-> %d+:%d+:%d+%]%s*(.+)")
+	-- Extract just the transcription text from the command output
+	-- Looking for text after timestamp pattern like [00:00:00.000 --> 00:00:05.030]
+	local text = nil
 
-	-- If no match with timestamp format, look for the last line that might be the transcription
+	-- Try to match the timestamp pattern and get the text after it
+	for line in output:gmatch("[^\r\n]+") do
+		local transcript = line:match("%[%d+:%d+:%d+%.%d+ %-%-> %d+:%d+:%d+%.%d+%]%s*(.+)")
+		if transcript then
+			text = transcript
+			break
+		end
+	end
+
+	-- If no match with timestamp format, try to find a line that looks like transcription
 	if not text then
 		for line in output:gmatch("[^\r\n]+") do
 			if
 				not line:match("^%s*$") -- not empty
 				and not line:match("^whisper_") -- not a whisper log line
-				and not line:match("^%[") -- not a timestamp or log
-				and not line:match("^main:")
-			then -- not main function output
+				and not line:match("^main:") -- not main function output
+				and not line:match("^%[%d+:%d+:%d+") -- not a timestamp with no transcription
+				and not line:match("Done%.")
+			then -- not the "Done." completion message
 				text = line
 			end
 		end
@@ -467,7 +477,7 @@ function M.record_and_transcribe_local()
 		return
 	end
 
-	-- Clean up text
+	-- Clean up text: trim whitespace and simplify multiple spaces
 	text = text:gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")
 
 	vim.api.nvim_echo({ { "Recognized: " .. text, "Normal" } }, false, {})
