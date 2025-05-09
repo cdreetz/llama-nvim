@@ -439,8 +439,10 @@ function M.record_and_transcribe_local()
 	vim.api.nvim_echo({ { "Processing speech...", "WarningMsg" } }, false, {})
 
 	-- path to whisper.cpp executable
-	local whisper_path = M.config.whisper_path or vim.fn.expand("~/whisper.cpp/main")
-	local whisper_model = M.config.whisper_model or vim.fn.expand("~/whisper.cpp/models/ggml-base.en.bin")
+	--local whisper_path = M.config.whisper_path or vim.fn.expand("~/whisper.cpp/main")
+	--local whisper_model = M.config.whisper_model or vim.fn.expand("~/whisper.cpp/models/ggml-base.en.bin")
+	local whisper_path = vim.fn.expand("~/dev/whisper.cpp/build/bin/whisper-cli")
+	local whisper_model = vim.fn.expand("~/dev/whisper.cpp/models/ggml-base.en.bin")
 
 	local transcribe_cmd =
 		string.format("%s -m %s -f %s -otxt -o %s", whisper_path, whisper_model, temp_audio_file, temp_output_file)
@@ -475,7 +477,7 @@ function M.record_and_transcribe_local()
 
 	vim.api.nvim_echo({ { "Recognized: " .. text, "Normal" } }, false, {})
 
-	process_voice_command(text)
+	M.process_voice_command(text)
 
 	return text
 end
