@@ -23,6 +23,7 @@ function M.setup(opts)
 	if not M.config.api_key then
 		error("Llama API key not set. Please set it in the setup function.")
 	end
+
 	-- Set up commands
 	vim.api.nvim_create_user_command("LlamaGenerate", M.generate_code, { nargs = 1 })
 	vim.api.nvim_create_user_command(
@@ -31,7 +32,11 @@ function M.setup(opts)
 		{ nargs = "+", complete = "file" }
 	)
 	vim.api.nvim_create_user_command("LlamaEdit", M.edit_code, { range = true, nargs = "?" })
-	--vim.api.nvim_create_user_command("LlamaApprove", M.approve_changes, {})
+	vim.api.nvim_create_user_command("LlamaVoice", M.record_and_transcribe_local, {})
+
+	-- Create keymappings
+	vim.api.nvim_set_keymap("n", "<leader>lv", ":LlamaVoice<CR>", { noremap = true, silent = true })
+	vim.api.nvim_set_keymap("v", "<leader>lv", ":LlamaVoice<CR>", { noremap = true, silent = true })
 
 	-- Log setup completion
 	log("Llama NVim plugin setup complete with model: " .. (M.config.model or "not set"))
@@ -414,230 +419,84 @@ vim.api.nvim_create_user_command("LlamaGenerateWithCodebase", M.LlamaGenerateWit
 	end,
 })
 
--- Add message to chat
-function M.add_message_to_chat(message)
-	-- Don't add empty messages
-	if message == nil or message == "" then
+-- speech stuff
+function M.record_and_transcribe_local()
+	local temp_audio_file = os.tmpname() .. ".wav"
+	local temp_output_file = os.tmpname() .. ".txt"
+
+	log("Starting audio recording to " .. temp_audio_file)
+
+	vim.api.nvim_echo({ { "Listening for voice command (5 seconds)...", "WarningMsg" } }, false, {})
+
+	local record_cmd = string.format("sox -d -r 16000 -c 1 -b 16 %s trim 0 5", temp_audio_file)
+
+	local record_success = os.execute(record_cmd)
+	if not record_success then
+		vim.api.nvim_echo({ { "Error recording audio. Is sox installed?", "ErrorMsg" } }, false, {})
 		return
 	end
-	
-	-- Get current buffer content
-	local lines = vim.api.nvim_buf_get_lines(M.chat_buffer, 0, -1, false)
-	local separator_line = 0
-	
-	-- Find the separator line
-	for i, line in ipairs(lines) do
-		if line:match("^%-%-%-%-%-") then
-			separator_line = i - 1
-			break
-		end
-	end
-	
-	-- If separator not found, return
-	if separator_line == 0 then
+
+	vim.api.nvim_echo({ { "Processing speech...", "WarningMsg" } }, false, {})
+
+	-- path to whisper.cpp executable
+	local whisper_path = M.config.whisper_path or vim.fn.expand("~/whisper.cpp/main")
+	local whisper_model = M.config.whisper_model or vim.fn.expand("~/whisper.cpp/models/ggml-base.en.bin")
+
+	local transcribe_cmd =
+		string.format("%s -m %s -f %s -otxt -o %s", whisper_path, whisper_model, temp_audio_file, temp_output_file)
+
+	local transcribe_success = os.execute(transcribe_cmd)
+	if not transcribe_success then
+		vim.api.nvim_echo({ { "Error transcribing audio", "ErrorMsg" } }, false, {})
+		os.remove(temp_audio_file)
 		return
 	end
-	
-	-- Insert the new message at the top of the content area
-	local timestamp = os.date("%H:%M:%S")
-	local new_message = "[" .. timestamp .. "] " .. message
-	
-	-- Insert the message before the separator
-	vim.api.nvim_buf_set_lines(M.chat_buffer, separator_line, separator_line, false, {new_message, ""})
-	
-	-- Clear the input area
-	local input_line = separator_line + 3
-	vim.api.nvim_buf_set_lines(M.chat_buffer, input_line, input_line + 1, false, {""})
-	
-	-- Move cursor back to input line
-	vim.api.nvim_win_set_cursor(0, {input_line + 1, 0})
-end
 
--- Setup chat autocmds for buffer behavior
-function M.setup_chat_buffer_behavior()
-	local chat_augroup = vim.api.nvim_create_augroup("LlamaChatBuffer", { clear = true })
-	
-	-- Make buffer modifiable only in the input area
-	vim.api.nvim_buf_set_option(M.chat_buffer, "modifiable", true)
-	
-	-- Handle Insert mode to prevent editing outside input area
-	vim.api.nvim_create_autocmd("InsertEnter", {
-		buffer = M.chat_buffer,
-		group = chat_augroup,
-		callback = function()
-			local line = vim.api.nvim_win_get_cursor(0)[1]
-			local lines = vim.api.nvim_buf_get_lines(M.chat_buffer, 0, -1, false)
-			local separator_line = 0
-			
-			-- Find the separator line
-			for i, l in ipairs(lines) do
-				if l:match("^%-%-%-%-%-") then
-					separator_line = i
-					break
-				end
-			end
-			
-			-- If not in the input area (below separator + 2), move to input
-			if line <= separator_line + 1 then
-				local input_line = separator_line + 2
-				vim.api.nvim_win_set_cursor(0, {input_line, 0})
-			end
-		end,
-	})
-	
-	-- Handle Enter key in insert mode to submit message
-	vim.api.nvim_buf_set_keymap(
-		M.chat_buffer,
-		"i",
-		"<CR>",
-		"<Esc>:lua require('llama-nvim').submit_chat_message()<CR>",
-		{ noremap = true, silent = true }
-	)
-	
-	-- Setup key mapping to always enter insert mode at input area
-	vim.api.nvim_buf_set_keymap(
-		M.chat_buffer, 
-		"n", 
-		"i", 
-		"<cmd>lua require('llama-nvim').go_to_input()<CR>", 
-		{ noremap = true, silent = true }
-	)
-	
-	-- Make all text before input area read-only
-	vim.api.nvim_create_autocmd("TextChanged", {
-		buffer = M.chat_buffer,
-		group = chat_augroup,
-		callback = function()
-			local lines = vim.api.nvim_buf_get_lines(M.chat_buffer, 0, -1, false)
-			local separator_line = 0
-			
-			-- Find the separator line
-			for i, l in ipairs(lines) do
-				if l:match("^%-%-%-%-%-") then
-					separator_line = i
-					break
-				end
-			end
-			
-			-- Check if content before separator was changed
-			local original_lines = vim.b[M.chat_buffer].original_lines or {}
-			local content_changed = false
-			
-			if #original_lines >= separator_line then
-				for i = 1, separator_line do
-					if i <= #original_lines and lines[i] ~= original_lines[i] then
-						content_changed = true
-						break
-					end
-				end
-				
-				-- If content was changed, restore it
-				if content_changed then
-					local restore_lines = {}
-					for i = 1, separator_line do
-						if i <= #original_lines then
-							table.insert(restore_lines, original_lines[i])
-						end
-					end
-					vim.api.nvim_buf_set_lines(M.chat_buffer, 0, separator_line, false, restore_lines)
-				end
-			end
-			
-			-- Store current state for next check
-			vim.b[M.chat_buffer].original_lines = vim.deepcopy(lines)
-		end
-	})
-end
-
--- Go to input area
-function M.go_to_input()
-	if not M.chat_buffer or not vim.api.nvim_buf_is_valid(M.chat_buffer) then
+	local file = io.open(temp_output_file, "r")
+	if not file then
+		vim.api.nvim_echo({ { "Error reading transcription output", "ErrorMsg" } }, false, {})
+		os.remove(temp_audio_file)
+		os.remove(temp_output_file)
 		return
 	end
-	
-	local lines = vim.api.nvim_buf_get_lines(M.chat_buffer, 0, -1, false)
-	local separator_line = 0
-	
-	-- Find the separator line
-	for i, l in ipairs(lines) do
-		if l:match("^%-%-%-%-%-") then
-			separator_line = i
-			break
+
+	local text = file:read("*all")
+	file:close()
+
+	os.remove(temp_audio_file)
+	os.remove(temp_output_file)
+
+	text = text:gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")
+
+	if text == "" then
+		vim.api.nvim_echo({ { "No speech detected", "WarningMsg" } }, false, {})
+		return
+	end
+
+	vim.api.nvim_echo({ { "Recognized: " .. text, "Normal" } }, false, {})
+
+	process_voice_command(text)
+
+	return text
+end
+
+function M.process_voice_command(text)
+	if text:match("^edit") or text:match("^change") or text:match("^modify") then
+		local mode = vim.api.nvim_get_mode().mode
+		if mode:match("[vV]") then
+			local start_line = vim.fn.line("'<")
+			local end_line = vim.fn.line("'>")
+
+			vim.cmd("normal! <Esc>") -- Exit visual mode
+			vim.cmd(start_line .. "," .. end_line .. "LlamaEdit " .. text:gsub("^edit%s*", ""))
+		else
+			vim.api.nvim_echo({ { "Please select text to edit first", "WarningMsg" } }, false, {})
 		end
+	else
+		vim.cmd("LlamaGenerate " .. text)
 	end
-	
-	if separator_line > 0 then
-		local input_line = separator_line + 2
-		vim.api.nvim_win_set_cursor(0, {input_line, 0})
-		vim.cmd("startinsert")
-	end
-end
 
--- Submit the current message
-function M.submit_chat_message()
-	local lines = vim.api.nvim_buf_get_lines(M.chat_buffer, 0, -1, false)
-	local separator_line = 0
-	
-	-- Find the separator line
-	for i, l in ipairs(lines) do
-		if l:match("^%-%-%-%-%-") then
-			separator_line = i
-			break
-		end
-	end
-	
-	if separator_line > 0 then
-		local input_line = separator_line + 2
-		local message = lines[input_line]
-		
-		-- Add the message to chat
-		M.add_message_to_chat(message)
-		
-		-- Enter insert mode again
-		vim.cmd("startinsert")
-	end
+	log("Voice command processed: " .. text)
 end
-
--- Simple function to open a chat sidebar
-function M.open_chat_sidebar()
-	-- Create a buffer if it doesn't exist
-	if not M.chat_buffer or not vim.api.nvim_buf_is_valid(M.chat_buffer) then
-		M.chat_buffer = vim.api.nvim_create_buf(false, true)
-		vim.api.nvim_buf_set_name(M.chat_buffer, "LlamaChat")
-	end
-	
-	-- Open the buffer in a vertical split on the right
-	vim.cmd("vsplit")
-	vim.cmd("vertical resize 50")
-	vim.cmd("wincmd L") -- Move to rightmost position
-	vim.api.nvim_win_set_buf(0, M.chat_buffer)
-	
-	-- Calculate chat content area and input area
-	local line_count = 20 -- Example content area size
-	
-	-- Create chat content with separator and input area at bottom
-	local lines = {}
-	for i = 1, line_count do
-		table.insert(lines, "")
-	end
-	table.insert(lines, string.rep("-", 48))
-	table.insert(lines, "--- Type your message below ---")
-	table.insert(lines, "")
-	
-	-- Set the buffer content
-	vim.api.nvim_buf_set_lines(M.chat_buffer, 0, -1, false, lines)
-	
-	-- Set cursor at input line (the last line)
-	vim.api.nvim_win_set_cursor(0, {#lines, 0})
-	
-	-- Setup buffer behavior
-	M.setup_chat_buffer_behavior()
-	
-	-- Enter insert mode
-	vim.cmd("startinsert")
-end
-
--- Register the chat command
-vim.api.nvim_create_user_command("LlamaChat", M.open_chat_sidebar, {})
 
 return M
