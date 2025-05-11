@@ -422,30 +422,46 @@ vim.api.nvim_create_user_command("LlamaGenerateWithCodebase", M.LlamaGenerateWit
 -- speech stuff
 function M.record_and_transcribe_local()
 	local temp_audio_file = os.tmpname() .. ".wav"
+	local temp_output_file = os.tmpname() .. ".txt"
 
-	-- Record audio
-	local record_cmd = string.format("sox -d -r 16000 -c 1 -b 16 %s trim 0 5", temp_audio_file)
-	vim.api.nvim_echo({ { "Listening for voice command (5 seconds)...", "WarningMsg" } }, false, {})
+	-- Create a more minimal UI indicator
+	local timer_id = vim.fn.timer_start(100, function()
+		vim.api.nvim_echo({ { "Recording 🎤", "WarningMsg" } }, false, {})
+	end, { ["repeat"] = 50 }) -- Repeats for 5 seconds
+
+	-- Record audio with output redirected to /dev/null
+	local record_cmd = string.format("sox -d -r 16000 -c 1 -b 16 %s trim 0 5 >/dev/null 2>&1", temp_audio_file)
 	os.execute(record_cmd)
 
-	vim.api.nvim_echo({ { "Processing speech...", "WarningMsg" } }, false, {})
+	-- Stop the timer
+	vim.fn.timer_stop(timer_id)
+
+	vim.api.nvim_echo({ { "Processing...", "WarningMsg" } }, false, {})
 
 	-- Hard-coded paths that work
 	local whisper_path = vim.fn.expand("~/dev/whisper.cpp/build/bin/whisper-cli")
 	local whisper_model = vim.fn.expand("~/dev/whisper.cpp/models/ggml-base.en.bin")
 
-	-- Use only the basic command with no fancy options, redirect stderr to /dev/null
-	local transcribe_cmd = whisper_path .. " -m " .. whisper_model .. " " .. temp_audio_file .. " 2>/dev/null"
+	-- Redirect all output to a temporary file to avoid printing to screen
+	local transcribe_cmd =
+		string.format("%s -m %s %s > %s 2>/dev/null", whisper_path, whisper_model, temp_audio_file, temp_output_file)
 
-	-- Run command and capture output
-	local handle = io.popen(transcribe_cmd)
-	local output = handle:read("*a")
-	handle:close()
+	-- Execute command silently
+	os.execute(transcribe_cmd)
 
+	-- Read the output file
+	local file = io.open(temp_output_file, "r")
+	local output = ""
+	if file then
+		output = file:read("*a")
+		file:close()
+	end
+
+	-- Clean up temporary files
 	os.remove(temp_audio_file)
+	os.remove(temp_output_file)
 
 	-- Extract just the transcription text from the command output
-	-- Looking for text after timestamp pattern like [00:00:00.000 --> 00:00:05.030]
 	local text = nil
 
 	-- Try to match the timestamp pattern and get the text after it
