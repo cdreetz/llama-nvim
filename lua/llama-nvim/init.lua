@@ -424,82 +424,130 @@ function M.record_and_transcribe_local()
 	local temp_audio_file = os.tmpname() .. ".wav"
 	local temp_output_file = os.tmpname() .. ".txt"
 
-	-- Create a more minimal UI indicator
-	local timer_id = vim.fn.timer_start(100, function()
-		vim.api.nvim_echo({ { "Recording 🎤", "WarningMsg" } }, false, {})
-	end, { ["repeat"] = 50 }) -- Repeats for 5 seconds
+	-- Show recording indicator immediately
+	vim.api.nvim_echo({ { "Recording 🎤", "WarningMsg" } }, false, {})
 
-	-- Record audio with output redirected to /dev/null
-	local record_cmd = string.format("sox -d -r 16000 -c 1 -b 16 %s trim 0 5 >/dev/null 2>&1", temp_audio_file)
-	os.execute(record_cmd)
+	-- Set up a repeating timer to update the recording indicator
+	local dots = 0
+	local timer_id = vim.fn.timer_start(500, function()
+		dots = (dots % 3) + 1
+		local dot_str = string.rep(".", dots)
+		vim.api.nvim_echo({ { "Recording 🎤" .. dot_str, "WarningMsg" } }, false, {})
+	end, { ["repeat"] = -1 }) -- Repeat indefinitely until stopped
 
-	-- Stop the timer
-	vim.fn.timer_stop(timer_id)
+	-- Prepare sox command to record audio
+	local cmd = "sox"
+	local args = { "-d", "-r", "16000", "-c", "1", "-b", "16", temp_audio_file, "trim", "0", "5" }
 
-	vim.api.nvim_echo({ { "Processing...", "WarningMsg" } }, false, {})
+	-- Use Neovim's job API for non-blocking execution
+	local job_id = vim.fn.jobstart({ cmd, unpack(args) }, {
+		on_exit = function(_, exit_code)
+			-- Stop the indicator timer
+			vim.fn.timer_stop(timer_id)
 
-	-- Hard-coded paths that work
-	local whisper_path = vim.fn.expand("~/dev/whisper.cpp/build/bin/whisper-cli")
-	local whisper_model = vim.fn.expand("~/dev/whisper.cpp/models/ggml-base.en.bin")
-
-	-- Redirect all output to a temporary file to avoid printing to screen
-	local transcribe_cmd =
-		string.format("%s -m %s %s > %s 2>/dev/null", whisper_path, whisper_model, temp_audio_file, temp_output_file)
-
-	-- Execute command silently
-	os.execute(transcribe_cmd)
-
-	-- Read the output file
-	local file = io.open(temp_output_file, "r")
-	local output = ""
-	if file then
-		output = file:read("*a")
-		file:close()
-	end
-
-	-- Clean up temporary files
-	os.remove(temp_audio_file)
-	os.remove(temp_output_file)
-
-	-- Extract just the transcription text from the command output
-	local text = nil
-
-	-- Try to match the timestamp pattern and get the text after it
-	for line in output:gmatch("[^\r\n]+") do
-		local transcript = line:match("%[%d+:%d+:%d+%.%d+ %-%-> %d+:%d+:%d+%.%d+%]%s*(.+)")
-		if transcript then
-			text = transcript
-			break
-		end
-	end
-
-	-- If no match with timestamp format, try to find a line that looks like transcription
-	if not text then
-		for line in output:gmatch("[^\r\n]+") do
-			if
-				not line:match("^%s*$") -- not empty
-				and not line:match("^whisper_") -- not a whisper log line
-				and not line:match("^main:") -- not main function output
-				and not line:match("^%[%d+:%d+:%d+") -- not a timestamp with no transcription
-				and not line:match("Done%.")
-			then -- not the "Done." completion message
-				text = line
+			if exit_code ~= 0 then
+				vim.api.nvim_echo({ { "Error recording audio", "ErrorMsg" } }, false, {})
+				os.remove(temp_audio_file)
+				return
 			end
-		end
+
+			-- Show processing message
+			vim.api.nvim_echo({ { "Processing speech...", "WarningMsg" } }, false, {})
+
+			-- Transcribe the audio using whisper.cpp
+			local whisper_path = vim.fn.expand("~/dev/whisper.cpp/build/bin/whisper-cli")
+			local whisper_model = vim.fn.expand("~/dev/whisper.cpp/models/ggml-base.en.bin")
+
+			-- Use jobstart again for the transcription
+			local transcribe_job_id = vim.fn.jobstart({
+				whisper_path,
+				"-m",
+				whisper_model,
+				temp_audio_file,
+			}, {
+				on_stdout = function(_, data)
+					if not data or #data == 0 then
+						return
+					end
+
+					-- Append stdout data to output file
+					local file = io.open(temp_output_file, "a")
+					if file then
+						for _, line in ipairs(data) do
+							if line and line ~= "" then
+								file:write(line .. "\n")
+							end
+						end
+						file:close()
+					end
+				end,
+				on_exit = function(_, _)
+					-- Process the transcription output
+					local file = io.open(temp_output_file, "r")
+					local output = ""
+					if file then
+						output = file:read("*a")
+						file:close()
+					end
+
+					-- Clean up temporary files
+					os.remove(temp_audio_file)
+					os.remove(temp_output_file)
+
+					-- Extract the transcription text
+					local text = nil
+
+					-- Try to match the timestamp pattern first
+					for line in output:gmatch("[^\r\n]+") do
+						local transcript = line:match("%[%d+:%d+:%d+%.%d+ %-%-> %d+:%d+:%d+%.%d+%]%s*(.+)")
+						if transcript then
+							text = transcript
+							break
+						end
+					end
+
+					-- Fallback to any line that looks like transcription
+					if not text then
+						for line in output:gmatch("[^\r\n]+") do
+							if
+								not line:match("^%s*$")
+								and not line:match("^whisper_")
+								and not line:match("^main:")
+								and not line:match("^%[%d+:%d+:%d+")
+								and not line:match("Done%.")
+							then
+								text = line
+								break
+							end
+						end
+					end
+
+					if not text or text == "" or text:match("%[BLANK_AUDIO%]") then
+						vim.api.nvim_echo({ { "No speech detected", "WarningMsg" } }, false, {})
+						return
+					end
+
+					-- Clean up text
+					text = text:gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")
+
+					vim.api.nvim_echo({ { "Recognized: " .. text, "Normal" } }, false, {})
+					M.process_voice_command(text)
+				end,
+			})
+
+			if transcribe_job_id <= 0 then
+				vim.api.nvim_echo({ { "Error starting transcription", "ErrorMsg" } }, false, {})
+				os.remove(temp_audio_file)
+			end
+		end,
+	})
+
+	if job_id <= 0 then
+		vim.fn.timer_stop(timer_id)
+		vim.api.nvim_echo({ { "Error starting recording", "ErrorMsg" } }, false, {})
 	end
 
-	if not text or text == "" or text:match("%[BLANK_AUDIO%]") then
-		vim.api.nvim_echo({ { "No speech detected", "WarningMsg" } }, false, {})
-		return
-	end
-
-	-- Clean up text: trim whitespace and simplify multiple spaces
-	text = text:gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")
-
-	vim.api.nvim_echo({ { "Recognized: " .. text, "Normal" } }, false, {})
-	M.process_voice_command(text)
-
-	return text
+	return job_id
 end
 
 function M.process_voice_command(text)
