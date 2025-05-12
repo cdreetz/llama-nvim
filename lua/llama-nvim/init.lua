@@ -423,6 +423,7 @@ vim.api.nvim_create_user_command("LlamaGenerateWithCodebase", M.LlamaGenerateWit
 function M.record_and_transcribe_local()
 	local temp_audio_file = os.tmpname() .. ".wav"
 	local temp_output_file = os.tmpname() .. ".txt"
+	local should_continue = true
 
 	-- Show recording indicator immediately
 	vim.api.nvim_echo({ { "Recording 🎤", "WarningMsg" } }, false, {})
@@ -433,21 +434,70 @@ function M.record_and_transcribe_local()
 		dots = (dots % 3) + 1
 		local dot_str = string.rep(".", dots)
 		vim.api.nvim_echo({ { "Recording 🎤" .. dot_str, "WarningMsg" } }, false, {})
-	end, { ["repeat"] = -1 }) -- Repeat indefinitely until stopped
+	end, { ["repeat"] = -1 })
 
-	-- Prepare sox command to record audio
+	-- Create a flag file to indicate recording is in progress
+	local flag_file = os.tmpname() .. ".flag"
+	local file = io.open(flag_file, "w")
+	file:write("recording")
+	file:close()
+
+	-- Set up key mapping to stop recording when Enter is pressed
+	vim.api.nvim_set_keymap("n", "<CR>", "", {
+		noremap = true,
+		callback = function()
+			if should_continue then
+				should_continue = false
+				os.remove(flag_file)
+				vim.api.nvim_echo({ { "Stopping recording...", "WarningMsg" } }, false, {})
+			end
+			return true -- Allow the keypress to continue processing
+		end,
+	})
+
+	-- Prepare sox command with longer timeout and a method to stop early
 	local cmd = "sox"
-	local args = { "-d", "-r", "16000", "-c", "1", "-b", "16", temp_audio_file, "trim", "0", "5" }
+	local args = {
+		"-d",
+		"-r",
+		"16000",
+		"-c",
+		"1",
+		"-b",
+		"16",
+		temp_audio_file,
+		"trim",
+		"0",
+		"10", -- Changed from 5 to 10 seconds
+		"silence",
+		"1",
+		"0.1",
+		"1%", -- Stop on silence
+	}
+
+	-- Use killable recording command
+	local stop_recording_cmd = string.format(
+		'bash -c \'for i in {1..100}; do if [ ! -f "%s" ]; then pkill -f "sox.*%s"; exit 0; fi; sleep 0.1; done\'',
+		flag_file,
+		temp_audio_file
+	)
+
+	-- Start the stop command in background
+	vim.fn.jobstart(stop_recording_cmd)
 
 	-- Use Neovim's job API for non-blocking execution
 	local job_id = vim.fn.jobstart({ cmd, unpack(args) }, {
 		on_exit = function(_, exit_code)
+			-- Restore normal Enter behavior
+			vim.api.nvim_del_keymap("n", "<CR>")
+
 			-- Stop the indicator timer
 			vim.fn.timer_stop(timer_id)
 
-			if exit_code ~= 0 then
+			if exit_code ~= 0 and should_continue then
 				vim.api.nvim_echo({ { "Error recording audio", "ErrorMsg" } }, false, {})
 				os.remove(temp_audio_file)
+				os.remove(flag_file)
 				return
 			end
 
@@ -469,7 +519,6 @@ function M.record_and_transcribe_local()
 					if not data or #data == 0 then
 						return
 					end
-
 					-- Append stdout data to output file
 					local file = io.open(temp_output_file, "a")
 					if file then
@@ -493,10 +542,10 @@ function M.record_and_transcribe_local()
 					-- Clean up temporary files
 					os.remove(temp_audio_file)
 					os.remove(temp_output_file)
+					os.remove(flag_file)
 
 					-- Extract the transcription text
 					local text = nil
-
 					-- Try to match the timestamp pattern first
 					for line in output:gmatch("[^\r\n]+") do
 						local transcript = line:match("%[%d+:%d+:%d+%.%d+ %-%-> %d+:%d+:%d+%.%d+%]%s*(.+)")
@@ -529,7 +578,6 @@ function M.record_and_transcribe_local()
 
 					-- Clean up text
 					text = text:gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")
-
 					vim.api.nvim_echo({ { "Recognized: " .. text, "Normal" } }, false, {})
 					M.process_voice_command(text)
 				end,
@@ -545,6 +593,8 @@ function M.record_and_transcribe_local()
 	if job_id <= 0 then
 		vim.fn.timer_stop(timer_id)
 		vim.api.nvim_echo({ { "Error starting recording", "ErrorMsg" } }, false, {})
+		vim.api.nvim_del_keymap("n", "<CR>")
+		os.remove(flag_file)
 	end
 
 	return job_id
