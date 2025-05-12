@@ -420,10 +420,23 @@ vim.api.nvim_create_user_command("LlamaGenerateWithCodebase", M.LlamaGenerateWit
 })
 
 -- speech stuff
-function M.record_and_transcribe_local()
+function M.record_and_transcribe_local(opts)
 	local temp_audio_file = os.tmpname() .. ".wav"
 	local temp_output_file = os.tmpname() .. ".txt"
 	local should_continue = true
+
+	-- Save visual selection information if provided
+	local has_range = false
+	local start_line, end_line
+	if opts and opts.range == 2 then
+		has_range = true
+		start_line = opts.line1
+		end_line = opts.line2
+		-- Exit visual mode if we're in it
+		if vim.api.nvim_get_mode().mode:match("[vV]") then
+			vim.cmd("normal! <Esc>")
+		end
+	end
 
 	-- Show recording indicator immediately
 	vim.api.nvim_echo({ { "Recording 🎤", "WarningMsg" } }, false, {})
@@ -579,7 +592,13 @@ function M.record_and_transcribe_local()
 					-- Clean up text
 					text = text:gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")
 					vim.api.nvim_echo({ { "Recognized: " .. text, "Normal" } }, false, {})
-					M.process_voice_command(text)
+
+					-- Process the voice command with the range if we have it
+					if has_range then
+						M.process_voice_command_with_range(text, start_line, end_line)
+					else
+						M.process_voice_command(text)
+					end
 				end,
 			})
 
@@ -598,6 +617,19 @@ function M.record_and_transcribe_local()
 	end
 
 	return job_id
+end
+
+-- Add a new function to process voice commands with a range
+function M.process_voice_command_with_range(text, start_line, end_line)
+	if text:match("^edit") or text:match("^change") or text:match("^modify") then
+		vim.cmd(start_line .. "," .. end_line .. "LlamaEdit " .. text:gsub("^edit%s*", ""))
+	else
+		-- If not an edit command, handle the text selection as context
+		local selected_text = table.concat(vim.api.nvim_buf_get_lines(0, start_line - 1, end_line, false), "\n")
+		vim.cmd("LlamaGenerate " .. text .. " [CONTEXT: " .. selected_text .. "]")
+	end
+
+	log("Voice command processed with range: " .. text)
 end
 
 function M.process_voice_command(text)
