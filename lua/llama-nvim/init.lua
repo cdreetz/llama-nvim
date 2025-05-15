@@ -34,6 +34,10 @@ function M.setup(opts)
 	vim.api.nvim_create_user_command("LlamaEdit", M.edit_code, { range = true, nargs = "?" })
 	vim.api.nvim_create_user_command("LlamaVoice", M.record_and_transcribe_local, { range = true })
 
+	vim.api.nvim_create_user_command("LLamaEditFile", M.edit_file, { nargs = "?" })
+
+	vim.api.nvim_set_keymap("n", "<leader>lef", ":LlamaEditFile ", { noremap = true })
+
 	-- Create keymappings
 	vim.api.nvim_set_keymap("n", "<leader>lv", ":LlamaVoice<CR>", { noremap = true, silent = true })
 	vim.api.nvim_set_keymap("v", "<leader>lv", ":LlamaVoice<CR>", { noremap = true, silent = true })
@@ -649,6 +653,146 @@ function M.process_voice_command(text)
 	end
 
 	log("Voice command processed: " .. text)
+end
+
+-- edit whole file
+function M.edit_file(opts)
+	local prompt = opts.args or ""
+	local file_content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+
+	-- Store original content for diff calculation
+	M.original_content = file_content
+	M.original_lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+
+	local messages = {
+		{
+			role = "system",
+			content = "You are a helpful coding assistant. Based on the user's prompt, edit the provided file. Return the entire file content with the changes applied. The code you generate will replace the current file, so ensure it's complete and valid. DO NOT add any explanations or markdown formatting.",
+		},
+		{
+			role = "user",
+			content = "Make the following changes to this file: " .. prompt .. "\n\nFILE CONTENT:\n" .. file_content,
+		},
+	}
+
+	-- Notify user that editing has started
+	vim.api.nvim_echo({ { "Editing file with Llama API...", "WarningMsg" } }, false, {})
+
+	-- Get current window/buffer info for updates
+	M.current_buf = vim.api.nvim_get_current_buf()
+	M.current_win = vim.api.nvim_get_current_win()
+
+	-- Clear existing diff highlights if any
+	M.clear_diff_highlights()
+
+	-- Variables to collect and process the new text
+	local collected_text = ""
+
+	call_llama_api_stream(messages, function(content)
+		if content then
+			-- Append to our collected text
+			collected_text = collected_text .. content
+
+			-- Process and visualize diffs as content arrives
+			M.process_streaming_diff(collected_text)
+		else
+			-- Finalize changes
+			M.finalize_file_edit(collected_text)
+
+			-- Notify completion
+			vim.api.nvim_echo({ { "File editing complete.", "Normal" } }, false, {})
+		end
+	end)
+end
+
+-- Initialize namespace for diff highlights
+M.diff_ns = vim.api.nvim_create_namespace("llama_diff_highlights")
+
+function M.clear_diff_highlights()
+	vim.api.nvim_buf_clear_namespace(M.current_buf, M.diff_ns, 0, -1)
+end
+
+function M.process_streaming_diff(current_text)
+	-- Split the streamed text into lines
+	local new_lines = vim.split(current_text, "\n", true)
+
+	-- Calculate how many complete lines we have
+	-- (the last line might be incomplete in streaming)
+	local complete_line_count = #new_lines
+
+	-- Compare each line with the original
+	for i = 1, math.min(complete_line_count, #M.original_lines) do
+		if new_lines[i] ~= M.original_lines[i] then
+			-- Line changed - highlight it
+			vim.api.nvim_buf_set_lines(M.current_buf, i - 1, i, false, { new_lines[i] })
+			vim.api.nvim_buf_add_highlight(M.current_buf, M.diff_ns, "DiffText", i - 1, 0, -1)
+		end
+	end
+
+	-- Handle additional lines (if any)
+	if complete_line_count > #M.original_lines then
+		vim.api.nvim_buf_set_lines(
+			M.current_buf,
+			#M.original_lines,
+			#M.original_lines,
+			false,
+			vim.list_slice(new_lines, #M.original_lines + 1, complete_line_count)
+		)
+
+		-- Highlight new lines
+		for i = #M.original_lines + 1, complete_line_count do
+			vim.api.nvim_buf_add_highlight(M.current_buf, M.diff_ns, "DiffAdd", i - 1, 0, -1)
+		end
+	end
+
+	-- Handle deleted lines
+	if complete_line_count < #M.original_lines then
+		-- Instead of removing lines immediately, mark them as deleted
+		for i = complete_line_count + 1, #M.original_lines do
+			vim.api.nvim_buf_add_highlight(M.current_buf, M.diff_ns, "DiffDelete", i - 1, 0, -1)
+		end
+	end
+end
+
+function M.finalize_file_edit(final_text)
+	-- Replace the entire buffer with the final text
+	local final_lines = vim.split(final_text, "\n", true)
+	vim.api.nvim_buf_set_lines(M.current_buf, 0, -1, false, final_lines)
+
+	-- Calculate final diff for highlighting
+	local added = {}
+	local changed = {}
+	local deleted = {}
+
+	-- Find changed and added lines
+	for i = 1, math.max(#final_lines, #M.original_lines) do
+		if i <= #final_lines and i <= #M.original_lines then
+			if final_lines[i] ~= M.original_lines[i] then
+				changed[i] = true
+			end
+		elseif i <= #final_lines then
+			added[i] = true
+		else
+			deleted[i] = true
+		end
+	end
+
+	-- Apply final highlights
+	for i, _ in pairs(changed) do
+		vim.api.nvim_buf_add_highlight(M.current_buf, M.diff_ns, "DiffText", i - 1, 0, -1)
+	end
+
+	for i, _ in pairs(added) do
+		vim.api.nvim_buf_add_highlight(M.current_buf, M.diff_ns, "DiffAdd", i - 1, 0, -1)
+	end
+
+	-- Create temporary marks for deleted lines (optional)
+	-- This could show deleted content in a virtual text
+
+	-- Schedule highlight removal after a delay
+	vim.defer_fn(function()
+		M.clear_diff_highlights()
+	end, 5000) -- Remove highlights after 5 seconds
 end
 
 return M
