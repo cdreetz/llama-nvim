@@ -204,6 +204,7 @@ function M.generate_code(opts)
 end
 
 -- Function to edit code
+-- Function to edit code with proper expansion handling
 function M.edit_code(opts)
 	local start_line = opts.line1 - 1
 	local end_line = opts.line2
@@ -211,13 +212,13 @@ function M.edit_code(opts)
 	local prompt = opts.args or ""
 
 	-- Log for debugging
-	vim.fn.writefile({ "Edit code range: " .. start_line .. "-" .. end_line }, "/tmp/llama_nvim_debug.log", "a")
-	vim.fn.writefile({ "Selected text: " .. selected_text }, "/tmp/llama_nvim_debug.log", "a")
+	log("Edit code range: " .. start_line .. "-" .. end_line)
+	log("Selected text: " .. selected_text)
 
 	local messages = {
 		{
 			role = "system",
-			content = "You are a helpful coding assistant. Based on the users prompt, and the selected code, rewrite the selection with any necessary edits based on the users prompt. All of the selected code will be deleted so make sure you rewrite it by incorporating both the old code and the new changes. The user is asking you to write some code, only generate the code they need with no additional formatting or text. The code you generate is written directly to the current file so make sure it is valid code. DO NOT WRAP THE CODE IN BACKTICKS, ONLY WRITE THE REAL CODE.",
+			content = "You are a helpful coding assistant. Based on the users prompt, and the selected code, rewrite the selection with any necessary edits based on the users prompt. The code you generate will replace the selected lines entirely. Do not wrap the code in backticks or add any explanations. Only output valid code.",
 		},
 		{
 			role = "user",
@@ -228,9 +229,15 @@ function M.edit_code(opts)
 	-- Store original cursor position
 	local window = vim.api.nvim_get_current_win()
 	local cursor_pos = vim.api.nvim_win_get_cursor(window)
+	local cursor_offset = cursor_pos[1] - start_line
 
-	-- Clear the selected lines but keep a backup
+	-- Store original lines for diff comparison
 	local original_lines = vim.api.nvim_buf_get_lines(0, start_line, end_line, false)
+
+	-- Create namespace for highlights
+	local diff_ns = vim.api.nvim_create_namespace("llama_edit_diff")
+
+	-- Clear selected lines but don't replace yet - just make space for visual indication
 	vim.api.nvim_buf_set_lines(0, start_line, end_line, false, {})
 
 	-- Notify user that editing has started
@@ -238,7 +245,6 @@ function M.edit_code(opts)
 
 	-- Variables to collect the new text
 	local collected_text = ""
-	local is_first_chunk = true
 
 	call_llama_api_stream(messages, function(content)
 		if content then
@@ -251,30 +257,54 @@ function M.edit_code(opts)
 			-- Split the current collected text into lines
 			local new_lines = vim.split(collected_text, "\n", true)
 
-			-- Replace the entire range with the current state of collected text
-			vim.api.nvim_buf_set_lines(0, start_line, start_line + #new_lines, false, new_lines)
+			-- Replace the range with current state of collected text
+			-- This will automatically expand if new_lines has more lines than original
+			vim.api.nvim_buf_set_lines(0, start_line, start_line + vim.tbl_count(new_lines), false, new_lines)
 
-			-- Update is_first_chunk flag
-			if is_first_chunk then
-				is_first_chunk = false
+			-- Highlight changed lines
+			vim.api.nvim_buf_clear_namespace(0, diff_ns, start_line, start_line + vim.tbl_count(new_lines))
+			for i = 1, vim.tbl_count(new_lines) do
+				local line_num = start_line + i - 1
+				if i <= #original_lines then
+					if new_lines[i] ~= original_lines[i] then
+						vim.api.nvim_buf_add_highlight(0, diff_ns, "DiffText", line_num, 0, -1)
+					end
+				else
+					vim.api.nvim_buf_add_highlight(0, diff_ns, "DiffAdd", line_num, 0, -1)
+				end
 			end
 		else
 			-- End of stream, finalize changes
 			local final_lines = vim.split(collected_text, "\n", true)
-			vim.api.nvim_buf_set_lines(0, start_line, start_line + #final_lines, false, final_lines)
 
-			-- Calculate new cursor position
-			local new_cursor_pos = {
-				start_line + math.min(cursor_pos[1] - start_line - 1, #final_lines),
-				math.min(cursor_pos[2], #(final_lines[math.min(cursor_pos[1] - start_line, #final_lines)] or "")),
-			}
+			-- Make sure all lines are properly highlighted
+			vim.api.nvim_buf_clear_namespace(0, diff_ns, start_line, start_line + vim.tbl_count(final_lines))
+			for i = 1, vim.tbl_count(final_lines) do
+				local line_num = start_line + i - 1
+				if i <= #original_lines then
+					if final_lines[i] ~= original_lines[i] then
+						vim.api.nvim_buf_add_highlight(0, diff_ns, "DiffText", line_num, 0, -1)
+					end
+				else
+					vim.api.nvim_buf_add_highlight(0, diff_ns, "DiffAdd", line_num, 0, -1)
+				end
+			end
 
-			-- Set cursor to appropriate position
-			pcall(vim.api.nvim_win_set_cursor, window, new_cursor_pos)
+			-- Calculate new cursor position that tries to maintain relative position
+			local new_cursor_row = start_line + math.min(cursor_offset, #final_lines)
+			local new_cursor_col = cursor_pos[2]
+			if new_cursor_row < vim.api.nvim_buf_line_count(0) then
+				pcall(vim.api.nvim_win_set_cursor, window, { new_cursor_row + 1, new_cursor_col })
+			end
+
+			-- Schedule removal of highlights after a delay
+			vim.defer_fn(function()
+				vim.api.nvim_buf_clear_namespace(0, diff_ns, start_line, start_line + vim.tbl_count(final_lines))
+			end, 5000) -- Remove highlights after 5 seconds
 
 			-- Notify completion
 			vim.api.nvim_echo({ { "Code editing complete.", "Normal" } }, false, {})
-			vim.fn.writefile({ "Code editing complete" }, "/tmp/llama_nvim_debug.log", "a")
+			log("Code editing complete")
 		end
 	end)
 end
