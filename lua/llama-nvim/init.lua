@@ -206,7 +206,6 @@ end
 -- Function to edit code
 -- Function to edit code with proper expansion handling
 -- Function to edit code with proper expansion handling
-
 function M.edit_code(opts)
 	local start_line = opts.line1 - 1
 	local end_line = opts.line2
@@ -215,158 +214,53 @@ function M.edit_code(opts)
 
 	-- Log for debugging
 	log("Edit code range: " .. start_line .. "-" .. end_line)
-	log("Selected text: " .. selected_text)
 
-	-- Store original content
-	M.original_range = { start_line = start_line, end_line = end_line }
-	M.original_text = selected_text
-
-	-- Store content below the selection to preserve it
-	local buffer_line_count = vim.api.nvim_buf_line_count(0)
-	M.below_content = {}
-	if end_line < buffer_line_count then
-		M.below_content = vim.api.nvim_buf_get_lines(0, end_line, -1, false)
-	end
+	-- Store original cursor position
+	local window = vim.api.nvim_get_current_win()
+	local cursor_pos = vim.api.nvim_win_get_cursor(window)
 
 	local messages = {
 		{
 			role = "system",
-			content = [[You are a code editing assistant. Your ONLY job is to directly modify the provided code according to the instructions.
-CRITICAL: 
-1. Return ONLY the modified code with NO explanation, NO comments about your changes, and NO alternatives.
-2. Do NOT include markdown formatting, code block markers, or backticks.
-3. Do NOT include any text like "Here's the edited code" or similar phrases.
-4. Do NOT provide multiple versions or alternatives.
-5. Maintain the same programming language and basic structure unless explicitly asked to change it.
-The entire content of your response will be inserted directly into a code file, so it must ONLY be valid code.]],
+			content = "You are a code editing assistant. Edit the provided code according to instructions. Return only the edited code.",
 		},
 		{
 			role = "user",
-			content = "INSTRUCTIONS: " .. prompt .. "\n\nCODE TO MODIFY:\n" .. selected_text,
+			content = "Edit this code: " .. prompt .. "\n\nCode:\n" .. selected_text,
 		},
 	}
 
-	-- Get original cursor position
-	local window = vim.api.nvim_get_current_win()
-	local cursor_pos = vim.api.nvim_win_get_cursor(window)
-
-	-- Create namespace for highlights
-	local diff_ns = vim.api.nvim_create_namespace("llama_edit_diff")
-
-	-- Clear existing highlights
-	vim.api.nvim_buf_clear_namespace(0, diff_ns, 0, -1)
-
-	-- First, just clear the selected area but don't modify anything below it yet
+	-- 1. Delete the highlighted section
 	vim.api.nvim_buf_set_lines(0, start_line, end_line, false, {})
 
-	-- Variables to track the edit
-	local generated_text = ""
-	local last_applied_line_count = 0
-
-	-- Notify user that editing has started
+	-- Notify user
 	vim.api.nvim_echo({ { "Editing code with Llama API...", "WarningMsg" } }, false, {})
+
+	-- Current insertion point
+	local current_line = start_line
 
 	call_llama_api_stream(messages, function(content)
 		if content then
-			-- Aggressively filter out non-code content
-			-- Remove any markdown code block markers
+			-- Remove code blocks if present
 			content = content:gsub("```[%w%s]*\n", ""):gsub("```", "")
 
-			-- Filter out explanatory text or headers (lines that begin with common natural language patterns)
-			local filtered_lines = {}
-			for _, line in ipairs(vim.split(content, "\n", true)) do
-				local is_likely_explanation = false
+			-- 3. For each new line, insert at the current position
+			local new_lines = vim.split(content, "\n", true)
 
-				-- Skip lines that look like explanations or headers
-				if
-					line:match("^Here")
-					or line:match("^I've")
-					or line:match("^The ")
-					or line:match("^This")
-					or line:match("^Now")
-					or line:match("^First")
-					or line:match("^Instead")
-					or line:match("^Alternative")
-					or line:match("^A better")
-					or line:match("^However")
-				then
-					is_likely_explanation = true
-				end
-
-				if not is_likely_explanation then
-					table.insert(filtered_lines, line)
-				end
-			end
-
-			-- Use the filtered content
-			content = table.concat(filtered_lines, "\n")
-
-			-- Append to our generated text
-			generated_text = generated_text .. content
-
-			-- Split into lines
-			local new_lines = vim.split(generated_text, "\n", true)
-			local new_line_count = #new_lines
-
-			-- Remove previous content that we've inserted
-			if last_applied_line_count > 0 then
-				vim.api.nvim_buf_set_lines(0, start_line, start_line + last_applied_line_count, false, {})
-			end
-
-			-- Add the new content
-			vim.api.nvim_buf_set_lines(0, start_line, start_line, false, new_lines)
-
-			-- Make sure content below selection stays in place
-			local current_end = start_line + new_line_count
-
-			-- Remove any content between our inserted content and where below_content should start
-			local current_below_start = math.min(current_end, buffer_line_count)
-			vim.api.nvim_buf_set_lines(0, current_end, current_below_start, false, {})
-
-			-- Reinsert content below
-			vim.api.nvim_buf_set_lines(0, current_end, current_end, false, M.below_content)
-
-			-- Update our counter
-			last_applied_line_count = new_line_count
-
-			-- Add highlights for the changes
-			vim.api.nvim_buf_clear_namespace(0, diff_ns, start_line, start_line + new_line_count)
-
-			-- Highlight all new content as changed for now
-			for i = 0, new_line_count - 1 do
-				vim.api.nvim_buf_add_highlight(0, diff_ns, "DiffText", start_line + i, 0, -1)
+			for _, line in ipairs(new_lines) do
+				-- Insert the new line at the current position
+				vim.api.nvim_buf_set_lines(0, current_line, current_line, false, { line })
+				-- Move insertion point down
+				current_line = current_line + 1
 			end
 		else
-			-- End of stream, finalize with a more accurate diff
-			local final_lines = vim.split(generated_text, "\n", true)
-			local original_lines = vim.split(M.original_text, "\n", true)
-
-			-- Calculate actual diff highlights
-			vim.api.nvim_buf_clear_namespace(0, diff_ns, start_line, start_line + #final_lines)
-
-			for i = 1, #final_lines do
-				local line_num = start_line + i - 1
-				if i <= #original_lines then
-					if final_lines[i] ~= original_lines[i] then
-						vim.api.nvim_buf_add_highlight(0, diff_ns, "DiffText", line_num, 0, -1)
-					end
-				else
-					vim.api.nvim_buf_add_highlight(0, diff_ns, "DiffAdd", line_num, 0, -1)
-				end
-			end
-
-			-- Fix cursor position
-			local new_cursor_line = math.min(cursor_pos[1], start_line + #final_lines)
+			-- End of stream, restore cursor to reasonable position
+			local new_cursor_line = math.min(cursor_pos[1], current_line)
 			pcall(vim.api.nvim_win_set_cursor, window, { new_cursor_line, cursor_pos[2] })
-
-			-- Auto-remove highlights after delay
-			vim.defer_fn(function()
-				vim.api.nvim_buf_clear_namespace(0, diff_ns, 0, -1)
-			end, 5000)
 
 			-- Notify completion
 			vim.api.nvim_echo({ { "Code editing complete.", "Normal" } }, false, {})
-			log("Code editing complete with " .. #final_lines .. " lines")
+			log("Code editing complete")
 		end
 	end)
 end
