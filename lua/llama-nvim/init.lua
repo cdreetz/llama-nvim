@@ -34,7 +34,7 @@ function M.setup(opts)
 	vim.api.nvim_create_user_command("LlamaEdit", M.edit_code, { range = true, nargs = "?" })
 	vim.api.nvim_create_user_command("LlamaVoice", M.record_and_transcribe_local, { range = true })
 
-	vim.api.nvim_create_user_command("LLamaEditFile", M.edit_file, { nargs = "?" })
+	vim.api.nvim_create_user_command("LlamaEditFile", M.edit_file, { nargs = "?" })
 
 	vim.api.nvim_set_keymap("n", "<leader>lef", ":LlamaEditFile ", { noremap = true })
 
